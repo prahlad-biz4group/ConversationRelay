@@ -1,6 +1,5 @@
 const WS_URL = "ws://127.0.0.1:8000/ws/audio";
 
-const toggleBtn = document.getElementById("toggleBtn");
 const statusEl = document.getElementById("status");
 const eventsEl = document.getElementById("events");
 const assistantEl = document.getElementById("assistant");
@@ -11,14 +10,12 @@ const chatMessageEl = document.getElementById("chatMessage");
 const chatSendBtn = document.getElementById("chatSendBtn");
 
 let ws = null;
-let audioContext = null;
-let mediaStream = null;
-let sourceNode = null;
-let processorNode = null;
-
-let isRunning = false;
 let wsConnectPromise = null;
 let pendingCustomMessages = [];
+
+let activeAssistantMessageId = null;
+let activeAssistantBuffer = "";
+let activeAssistantPrefix = "";
 
 function wsReady() {
   return ws && ws.readyState === WebSocket.OPEN;
@@ -96,6 +93,46 @@ function attachWsHandlers(localWs) {
 
         if (eventName === "assistant.response") {
           appendAssistant(msg.text || JSON.stringify(msg));
+        } else if (eventName === "assistant.message.started") {
+          activeAssistantMessageId = msg.message_id || null;
+          activeAssistantBuffer = "";
+          // Snapshot current text; stream will update textarea with prefix + buffer
+          activeAssistantPrefix = assistantEl.value;
+          if (activeAssistantPrefix && !activeAssistantPrefix.endsWith("\n")) {
+            activeAssistantPrefix += "\n";
+          }
+          assistantEl.value = activeAssistantPrefix;
+        } else if (eventName === "assistant.message.delta") {
+          if (!activeAssistantMessageId) {
+            activeAssistantMessageId = msg.message_id || null;
+          }
+          if (msg.message_id && activeAssistantMessageId && msg.message_id !== activeAssistantMessageId) {
+            // Ignore deltas from an old message if we already switched.
+            return;
+          }
+          appendAssistantStream(String(msg.delta || ""));
+        } else if (eventName === "assistant.message.completed") {
+          if (msg.message_id && activeAssistantMessageId && msg.message_id !== activeAssistantMessageId) {
+            return;
+          }
+          activeAssistantMessageId = null;
+          activeAssistantBuffer = "";
+          activeAssistantPrefix = assistantEl.value;
+          if (activeAssistantPrefix && !activeAssistantPrefix.endsWith("\n")) {
+            assistantEl.value += "\n";
+          }
+          assistantEl.scrollTop = assistantEl.scrollHeight;
+        } else if (eventName === "assistant.message.cancelled") {
+          if (msg.message_id && activeAssistantMessageId && msg.message_id !== activeAssistantMessageId) {
+            return;
+          }
+          activeAssistantMessageId = null;
+          activeAssistantBuffer = "";
+          activeAssistantPrefix = assistantEl.value;
+          if (activeAssistantPrefix && !activeAssistantPrefix.endsWith("\n")) {
+            assistantEl.value += "\n";
+          }
+          assistantEl.scrollTop = assistantEl.scrollHeight;
         } else {
           addEventCard(msg);
         }
@@ -179,13 +216,6 @@ async function ensureWsConnected() {
   await wsConnectPromise;
 }
 
-function requireSecureContextOrThrow() {
-  if (window.isSecureContext) return;
-  const hint =
-    "Microphone access requires a secure context. Open this page via http://localhost (not file://).";
-  throw new Error(hint);
-}
-
 function sendCustomMessage() {
   const text = (customMessageEl?.value || "").trim();
   if (!text) return;
@@ -236,6 +266,12 @@ function appendAssistant(line) {
   assistantEl.scrollTop = assistantEl.scrollHeight;
 }
 
+function appendAssistantStream(delta) {
+  activeAssistantBuffer += delta;
+  assistantEl.value = activeAssistantPrefix + activeAssistantBuffer;
+  assistantEl.scrollTop = assistantEl.scrollHeight;
+}
+
 function prettyJson(value) {
   try {
     return JSON.stringify(value, null, 2);
@@ -281,196 +317,3 @@ function addEventCard(msg) {
   eventsEl.appendChild(card);
   eventsEl.scrollTop = eventsEl.scrollHeight;
 }
-
-async function logAudioDeviceInfo() {
-  if (!navigator.mediaDevices?.enumerateDevices) {
-    appendTranscript("enumerateDevices() not available in this browser context.");
-    return;
-  }
-
-  try {
-    const devices = await navigator.mediaDevices.enumerateDevices();
-    const inputs = devices.filter((d) => d.kind === "audioinput");
-    const outputs = devices.filter((d) => d.kind === "audiooutput");
-    appendTranscript(
-      `Audio devices: inputs=${inputs.length} outputs=${outputs.length} total=${devices.length}`
-    );
-  } catch (e) {
-    appendTranscript(`enumerateDevices failed: ${String(e?.message || e)}`);
-  }
-}
-
-function downsampleTo16k(float32, inSampleRate) {
-  const outSampleRate = 16000;
-  if (inSampleRate === outSampleRate) return float32;
-
-  const ratio = inSampleRate / outSampleRate;
-  const outLength = Math.floor(float32.length / ratio);
-  const out = new Float32Array(outLength);
-
-  let inOffset = 0;
-  for (let i = 0; i < outLength; i++) {
-    const nextInOffset = Math.floor((i + 1) * ratio);
-    let sum = 0;
-    let count = 0;
-    while (inOffset < nextInOffset && inOffset < float32.length) {
-      sum += float32[inOffset++];
-      count++;
-    }
-    out[i] = count > 0 ? sum / count : 0;
-  }
-
-  return out;
-}
-
-async function start() {
-  if (isRunning) return;
-  isRunning = true;
-  toggleBtn.textContent = "Stop";
-  toggleBtn.classList.add("running");
-
-  setStatus("Connecting…");
-  if (eventsEl) eventsEl.innerHTML = "";
-  if (customConsoleEl) customConsoleEl.innerHTML = "";
-  assistantEl.value = "";
-
-  try {
-    requireSecureContextOrThrow();
-  } catch (e) {
-    appendTranscript(String(e?.message || e));
-    setStatus("Mic blocked (insecure context)");
-    stop(false);
-    return;
-  }
-
-  let hasMic = false;
-  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-    appendTranscript("getUserMedia is not available in this browser context.");
-  } else {
-    await logAudioDeviceInfo();
-
-    setStatus("Requesting mic permission…");
-    try {
-      mediaStream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          channelCount: 1,
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-        },
-      });
-      hasMic = true;
-    } catch (e) {
-      if (e?.name === "NotFoundError" || e?.name === "DevicesNotFoundError") {
-        appendTranscript(
-          "Microphone not found (no input device). You can still connect to the backend, but audio streaming/STT will be disabled."
-        );
-      }
-      appendTranscript(
-        `Microphone permission failed: ${String(e?.name || "Error")} ${String(
-          e?.message || e
-        )}`
-      );
-    }
-  }
-
-  setStatus("Connecting…");
-
-  const localWs = new WebSocket(WS_URL);
-  ws = localWs;
-  attachWsHandlers(localWs);
-
-  localWs.onopen = () => {
-    if (!isRunning || ws !== localWs || localWs.readyState !== WebSocket.OPEN) {
-      return;
-    }
-    localWs.send(
-      JSON.stringify({
-        event: "client.started",
-        audio_enabled: hasMic,
-        audio: hasMic ? { format: "f32le", sample_rate: 16000, channels: 1 } : null,
-      })
-    );
-    setStatus(hasMic ? "Listening…" : "Connected (no mic)" );
-    setSendEnabled(true);
-  };
-
-  localWs.onclose = () => {
-    if (ws === localWs) stop(true);
-  };
-
-  if (hasMic) {
-    audioContext = new (window.AudioContext || window.webkitAudioContext)();
-    sourceNode = audioContext.createMediaStreamSource(mediaStream);
-
-    const bufferSize = 4096;
-    processorNode = audioContext.createScriptProcessor(bufferSize, 1, 1);
-
-    processorNode.onaudioprocess = (e) => {
-      if (!ws || ws.readyState !== WebSocket.OPEN) return;
-
-      const input = e.inputBuffer.getChannelData(0);
-      const down = downsampleTo16k(input, audioContext.sampleRate);
-
-      ws.send(down.buffer);
-    };
-
-    sourceNode.connect(processorNode);
-    processorNode.connect(audioContext.destination);
-
-    setStatus("Mic ready. Waiting for WS…");
-  } else {
-    setStatus("Connecting…");
-  }
-}
-
-async function stop(fromSocketClose = false) {
-  if (!isRunning) return;
-  isRunning = false;
-  toggleBtn.textContent = "Start";
-  toggleBtn.classList.remove("running");
-
-  if (!fromSocketClose) {
-    try {
-      ws?.send(JSON.stringify({ event: "client.stopped" }));
-    } catch {}
-  }
-
-  try {
-    processorNode?.disconnect();
-  } catch {}
-  try {
-    sourceNode?.disconnect();
-  } catch {}
-
-  processorNode = null;
-  sourceNode = null;
-
-  if (mediaStream) {
-    for (const track of mediaStream.getTracks()) track.stop();
-  }
-  mediaStream = null;
-
-  if (audioContext) {
-    try {
-      await audioContext.close();
-    } catch {}
-  }
-  audioContext = null;
-
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.close();
-  }
-  ws = null;
-  wsConnectPromise = null;
-  pendingCustomMessages = [];
-
-  setSendEnabled(false);
-
-  setStatus("Idle");
-}
-
-toggleBtn.addEventListener("click", () => {
-  if (isRunning) stop(false);
-  else start();
-});

@@ -1,5 +1,6 @@
 import json
 import logging
+import asyncio
 from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID, uuid4
@@ -142,6 +143,9 @@ async def _handle_text_message(relay: Relay, db: AsyncSession, text: str) -> Non
 
         relay.add_user_text(text_value)
 
+        # Barge-in: if an assistant response is currently streaming, cancel it.
+        await relay.cancel_assistant_stream(reason="new_user_message")
+
         global llm
         if llm is None:
             try:
@@ -150,32 +154,63 @@ async def _handle_text_message(relay: Relay, db: AsyncSession, text: str) -> Non
                 await relay.send_event({"event": "error", "message": str(e)})
                 return
 
-        try:
-            answer = await llm.chat(relay.history)
-        except LLMError as e:
-            await relay.send_event({"event": "error", "message": str(e)})
-            return
-        except Exception:
+        assistant_message_id = str(uuid4())
+        await relay.send_event(
+            {
+                "event": "assistant.message.started",
+                "message_id": assistant_message_id,
+            }
+        )
+
+        async def _run_stream() -> None:
+            full_text_parts: list[str] = []
+            try:
+                async for delta in llm.stream(relay.history):
+                    full_text_parts.append(delta)
+                    await relay.send_event(
+                        {
+                            "event": "assistant.message.delta",
+                            "message_id": assistant_message_id,
+                            "delta": delta,
+                        }
+                    )
+            except asyncio.CancelledError:
+                raise
+            except LLMError as e:
+                await relay.send_event({"event": "error", "message": str(e)})
+                return
+            except Exception:
+                await relay.send_event(
+                    {
+                        "event": "error",
+                        "message": "LLM request failed (check provider/API key)",
+                    }
+                )
+                return
+
+            answer = "".join(full_text_parts)
+            relay.add_assistant_text(answer)
+            if relay.db_conversation_id is not None:
+                db.add(
+                    Message(
+                        conversation_id=relay.db_conversation_id,
+                        role="assistant",
+                        content=answer,
+                        created_at=datetime.now(timezone.utc),
+                    )
+                )
+                await db.commit()
+
             await relay.send_event(
                 {
-                    "event": "error",
-                    "message": "LLM request failed (if using Ollama, ensure it is running)",
+                    "event": "assistant.message.completed",
+                    "message_id": assistant_message_id,
+                    "text": answer,
                 }
             )
-            return
 
-        relay.add_assistant_text(answer)
-        if relay.db_conversation_id is not None:
-            db.add(
-                Message(
-                    conversation_id=relay.db_conversation_id,
-                    role="assistant",
-                    content=answer,
-                    created_at=datetime.now(timezone.utc),
-                )
-            )
-            await db.commit()
-        await relay.send_event({"event": "assistant.response", "text": answer})
+        task = asyncio.create_task(_run_stream())
+        relay.set_assistant_task(task, assistant_message_id)
         return
 
     await relay.send_event({"event": "ack", "received_event": event_name})

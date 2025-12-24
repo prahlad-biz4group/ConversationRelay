@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 import re
-from typing import Any, Protocol
+from typing import Any, AsyncIterator, Protocol
 
 import httpx
 
@@ -15,6 +16,12 @@ class LLMError(RuntimeError):
 
 class LLM(Protocol):
     async def chat(self, messages: list[dict[str, str]]) -> str: ...
+    async def stream(self, messages: list[dict[str, str]]) -> AsyncIterator[str]: ...
+
+
+async def _chunk_text(text: str, chunk_size: int = 24) -> AsyncIterator[str]:
+    for i in range(0, len(text), chunk_size):
+        yield text[i : i + chunk_size]
 
 
 @dataclass(slots=True)
@@ -98,6 +105,11 @@ class MockLLM:
             f"Your message: {text}"
         )
 
+    async def stream(self, messages: list[dict[str, str]]) -> AsyncIterator[str]:
+        text = await self.chat(messages)
+        async for chunk in _chunk_text(text):
+            yield chunk
+
 
 class OllamaLLM:
     def __init__(
@@ -129,6 +141,12 @@ class OllamaLLM:
         if not isinstance(content, str):
             raise LLMError("Invalid Ollama response format")
         return content
+
+    async def stream(self, messages: list[dict[str, str]]) -> AsyncIterator[str]:
+        # Fallback: Ollama streaming API can be added later; for now chunk the final response.
+        text = await self.chat(messages)
+        async for chunk in _chunk_text(text):
+            yield chunk
 
 
 class OpenAILLM:
@@ -170,6 +188,48 @@ class OpenAILLM:
         if not isinstance(content, str):
             raise LLMError("Invalid OpenAI response format")
         return content
+
+    async def stream(self, messages: list[dict[str, str]]) -> AsyncIterator[str]:
+        payload: dict[str, Any] = {
+            "model": self._model,
+            "messages": messages,
+            "stream": True,
+        }
+
+        headers = {"Authorization": f"Bearer {self._api_key}"}
+
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            async with client.stream(
+                "POST",
+                f"{self._base_url}/chat/completions",
+                json=payload,
+                headers=headers,
+            ) as resp:
+                if resp.status_code >= 400:
+                    body = (await resp.aread()).decode("utf-8", errors="replace")
+                    raise LLMError(f"OpenAI error {resp.status_code}: {body}")
+
+                async for line in resp.aiter_lines():
+                    if not line or not line.startswith("data:"):
+                        continue
+
+                    data = line.removeprefix("data:").strip()
+                    if data == "[DONE]":
+                        break
+
+                    try:
+                        evt = json.loads(data)
+                    except Exception:
+                        continue
+
+                    choices = evt.get("choices")
+                    if not isinstance(choices, list) or not choices:
+                        continue
+
+                    delta = (choices[0] or {}).get("delta") or {}
+                    chunk = delta.get("content")
+                    if isinstance(chunk, str) and chunk:
+                        yield chunk
 
 
 class GeminiLLM:
@@ -223,6 +283,12 @@ class GeminiLLM:
         if not isinstance(text_out, str):
             raise LLMError("Invalid Gemini response format")
         return text_out
+
+    async def stream(self, messages: list[dict[str, str]]) -> AsyncIterator[str]:
+        # Fallback: Gemini streaming can be added later; for now chunk the final response.
+        text = await self.chat(messages)
+        async for chunk in _chunk_text(text):
+            yield chunk
 
 
 def get_llm() -> LLM:
