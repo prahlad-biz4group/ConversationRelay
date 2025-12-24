@@ -17,7 +17,7 @@ router = APIRouter()
 
 logger = logging.getLogger(__name__)
 
-llm = get_llm()
+llm = None
 
 
 @router.websocket("/ws/audio")
@@ -92,6 +92,11 @@ async def _handle_text_message(relay: Relay, db: AsyncSession, text: str) -> Non
         await relay.send_event({"event": "ack", "received_event": event_name})
         return
 
+    if event_name == "client.conversation.reset":
+        relay.history.clear()
+        await relay.send_event({"event": "conversation.reset"})
+        return
+
     if event_name == "client.custom.message":
         text_value = payload.get("text")
         print(
@@ -113,6 +118,11 @@ async def _handle_text_message(relay: Relay, db: AsyncSession, text: str) -> Non
             return
 
         text_value = text_value.strip()
+
+        if text_value == "/reset":
+            relay.history.clear()
+            await relay.send_event({"event": "conversation.reset"})
+            return
         logger.info(
             "client.text.message conversation_id=%s text=%r",
             relay.conversation_id,
@@ -131,6 +141,14 @@ async def _handle_text_message(relay: Relay, db: AsyncSession, text: str) -> Non
             await db.commit()
 
         relay.add_user_text(text_value)
+
+        global llm
+        if llm is None:
+            try:
+                llm = get_llm()
+            except LLMError as e:
+                await relay.send_event({"event": "error", "message": str(e)})
+                return
 
         try:
             answer = await llm.chat(relay.history)
