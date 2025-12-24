@@ -1,0 +1,70 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# Packaging / build
+build/
+dist/
+*.egg-info/
+
+# Test / coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Logs
+*.log
+
+# Environment / secrets
+.env
+.env.*
+backend/.env
+backend/.env.*
+
+# Database / local state
+*.sqlite3
+
+# Node / frontend tooling (even though frontend is static, ignore common artifacts)
+node_modules/
+.npm/
+.pnpm-store/
+
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Windows
+*.lnk
+
+# IDEs
+.vscode/
+.idea/
+*.iml
+
+# JetBrains
+.idea/**/workspace.xml
+.idea/**/tasks.xml
+.idea/**/usage.statistics.xml
+.idea/**/dictionaries
+.idea/**/shelf
+
+# Python type checkers
+.mypy_cache/
+.pyright/
+
+# Uvicorn reload temp
+*.pid
+
+# Local configs
+*.local

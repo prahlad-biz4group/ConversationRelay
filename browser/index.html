@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Local Conversation Relay</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <div class="container">
+      <h1>Local Conversation Relay</h1>
+
+      <div class="controls">
+        <button id="toggleBtn">Start</button>
+        <div id="status" class="status">Idle</div>
+      </div>
+
+      <div class="grid">
+        <div class="panel">
+          <div class="panel-title">Transcript / Events</div>
+          <div id="events" class="events"></div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-title">Assistant</div>
+          <textarea id="assistant" readonly></textarea>
+        </div>
+      </div>
+
+      <div class="composer">
+        <input id="customMessage" type="text" placeholder="Type a message to send to backend…" />
+        <button id="sendBtn">Send</button>
+      </div>
+
+      <div class="composer">
+        <input id="chatMessage" type="text" placeholder="Chat to AI (text)…" />
+        <button id="chatSendBtn">Ask AI</button>
+      </div>
+
+      <div class="panel console-panel">
+        <div class="panel-title">Custom Event Console</div>
+        <div id="customConsole" class="events"></div>
+      </div>
+
+      <div class="footer">
+        Backend:
+        <code>ws://127.0.0.1:8000/ws/audio</code>
+      </div>
+    </div>
+
+    <script src="app.js"></script>
+  </body>
+</html>
